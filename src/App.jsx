@@ -5,10 +5,12 @@ import NewsCard from './components/NewsCard';
 import AlertsCard from './components/AlertsCard';
 import SearchBar from './components/SearchBar';
 import StatusBar from './components/StatusBar';
+import fetchWithRetry  from './utils/asyncPatterns';
+import fetchDashboardData from './services/dashboardService';
 
 // PROBLEM: This basic fetch has no retry, no caching, no error handling
 async function basicFetch(url) {
-  const response = await fetch(url);
+  const response = await fetchWithRetry(url, { timeout: 5000 }, 3);
   if (!response.ok) {
     throw new Error('Network response was not ok');
   }

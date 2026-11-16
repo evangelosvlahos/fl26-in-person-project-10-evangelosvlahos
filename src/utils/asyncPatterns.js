@@ -17,9 +17,44 @@
  * @returns {Promise<Response>} - The fetch response
  */
 export async function fetchWithRetry(url, options = {}, maxRetries = 3) {
-  // TODO: Implement retry logic with exponential backoff
-  // For now, just do a basic fetch
-  return fetch(url, options);
+  const { timeout = 5000, ...fetchOptions } = options;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const controller = new AbortController();
+    let timeoutId;
+
+    try {
+      timeoutId = setTimeout(() => controller.abort(), timeout);
+      const response = await fetch(url, { ...fetchOptions, signal: controller.signal });
+
+      if (!response.ok) {
+        const error = new Error(`HTTP ${response.status}`);
+        error.status = response.status;
+        throw error;
+      }
+
+      return response;
+    } catch (error) {
+      if (error?.status >= 400 && error?.status < 500) {
+        throw error;
+      }
+
+      if (attempt === maxRetries) {
+        console.error(`Failed after ${maxRetries + 1} attempts: ${url}`);
+        throw error;
+      }
+
+      const delay = Math.pow(2, attempt) * 1000;
+      console.log(`Retry attempt ${attempt + 1} after ${delay}ms: ${url}`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    }
+  }
+
+  throw new Error(`Failed to fetch ${url}`);
 }
 
 /**
@@ -32,22 +67,33 @@ export async function fetchWithRetry(url, options = {}, maxRetries = 3) {
  */
 class RequestCache {
   constructor(ttl = 60000) {
-    // TODO: Initialize cache storage and TTL
+    this.cache = new Map();
+    this.ttl = ttl;
   }
 
   set(key, value) {
-    // TODO: Store value with timestamp
+    this.cache.set(key, { value, timestamp: Date.now() });
   }
 
   get(key) {
-    // TODO: Return value if not expired, null otherwise
-    return null;
+    const entry = this.cache.get(key);
+    if (!entry) return null;
+
+    const age = Date.now() - entry.timestamp;
+    if (age > this.ttl) {
+      this.cache.delete(key);
+      return null;
+    }
+
+    return entry.value;
   }
 
   clear() {
-    // TODO: Clear all cache entries
+    this.cache.clear();
   }
 }
+
+const cache = new RequestCache(15000); // answers stay fresh for 15 seconds
 
 /**
  * TODO: Implement cachedFetch
@@ -63,10 +109,29 @@ class RequestCache {
  * @returns {Promise<any>} - Parsed JSON response
  */
 export async function cachedFetch(url, options = {}) {
-  // TODO: Implement caching and deduplication
-  // For now, just do a basic fetch
-  const response = await fetch(url, options);
-  return response.json();
+  const cached = cache.get(url);
+  if (cached) {
+    console.log('Cache hit:', url);
+    return { ...cached, cached: true };
+  }
+
+  if (pendingRequests.has(url)) {
+    console.log('Request deduped:', url);
+    return pendingRequests.get(url);
+  }
+
+  const requestPromise = fetchWithRetry(url, options)
+    .then(async (response) => {
+      const data = await response.json();
+      cache.set(url, data);
+      return data;
+    })
+    .finally(() => {
+      pendingRequests.delete(url);
+    });
+
+  pendingRequests.set(url, requestPromise);
+  return requestPromise;
 }
 
 /**
@@ -82,8 +147,24 @@ export async function cachedFetch(url, options = {}) {
  * @returns {Promise<Response>} - The fetch response
  */
 export async function fetchWithTimeout(url, timeout = 5000) {
-  // TODO: Implement timeout using Promise.race
-  return fetch(url);
+  const controller = new AbortController();
+  let timeoutId;
+
+  try {
+    const responsePromise = fetch(url, { signal: controller.signal });
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        controller.abort();
+        reject(new Error(`Request timed out after ${timeout}ms`));
+      }, timeout);
+    });
+
+    return await Promise.race([responsePromise, timeoutPromise]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
 }
 
 /**
@@ -98,18 +179,25 @@ export async function fetchWithTimeout(url, timeout = 5000) {
  * @returns {Promise<object>} - Object with results keyed by name
  */
 export async function fetchAllParallel(requests) {
-  // TODO: Implement parallel fetching with Promise.allSettled
-  const results = {};
+  const settled = await Promise.allSettled(
+    requests.map(async ({ name, url }) => {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      return { name, value: await response.json() };
+    })
+  );
 
-  // For now, fetch sequentially (this is what we're fixing!)
-  for (const req of requests) {
-    try {
-      const response = await fetch(req.url);
-      results[req.name] = await response.json();
-    } catch (error) {
-      results[req.name] = { error: error.message };
+  const results = {};
+  settled.forEach((result, index) => {
+    const request = requests[index];
+    if (result.status === 'fulfilled') {
+      results[request.name] = result.value.value;
+    } else {
+      results[request.name] = { error: result.reason.message };
     }
-  }
+  });
 
   return results;
 }
@@ -126,10 +214,19 @@ export async function fetchAllParallel(requests) {
  * @returns {Promise<any>} - First successful response
  */
 export async function getFastestSource(urls) {
-  // TODO: Implement using Promise.race
-  // For now, just try the first URL
-  const response = await fetch(urls[0]);
-  return response.json();
+  if (!Array.isArray(urls) || urls.length === 0) {
+    throw new Error('No URLs provided');
+  }
+
+  const promises = urls.map(async (url) => {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    return response.json();
+  });
+
+  return Promise.any(promises);
 }
 
 /**
@@ -142,6 +239,14 @@ export async function getFastestSource(urls) {
 const pendingRequests = new Map();
 
 export function dedupedFetch(url, options = {}) {
-  // TODO: Implement deduplication logic
-  return fetch(url, options);
+  if (pendingRequests.has(url)) {
+    return pendingRequests.get(url);
+  }
+
+  const requestPromise = fetch(url, options).finally(() => {
+    pendingRequests.delete(url);
+  });
+
+  pendingRequests.set(url, requestPromise);
+  return requestPromise;
 }
